@@ -11,10 +11,12 @@
 #include "prx/libSceAgcDriver/Execution/include/ShaderPreparationScope.hpp"
 #include "CompiledVariant.hpp"
 #include "Optimization/ResourceProgram.hpp"
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <list>
 #include <stdexcept>
+#include <string_view>
 #include "RdnaDecoder/RdnaInstructionDecoder.hpp"
 
 namespace AgcDriver::DriverDetail {
@@ -178,6 +180,8 @@ std::shared_ptr<const ShaderRecompiler::SourceHandle> SourceHandleFor(const Shad
     if (snapshot.header.empty()) {
         if (snapshot.type != 0 || request.shader.stage != ShaderRecompiler::ShaderStage::Compute) throw std::runtime_error("AGC driver: unregistered program is not a compute shader");
         APS5_LOG_ERR("Compute shader 0x%llx was not registered; preparing its artifact at dispatch", static_cast<unsigned long long>(snapshot.codeAddress));
+    }
+    if (snapshot.header.empty() || (snapshot.prepared->entries.empty() && request.shader.stage == ShaderRecompiler::ShaderStage::Compute)) {
         auto handle = ShaderRecompiler::PrepareShader(request);
         snapshot.prepared->entries.push_back({codeOffset, handle});
         return handle;
@@ -219,6 +223,8 @@ ShaderRecompiler::PreparedShaderInvocation InvocationFor(const ShaderSnapshot& s
     if (snapshot.header.empty()) {
         if (snapshot.type != 0 || request.shader.stage != ShaderRecompiler::ShaderStage::Compute) throw std::runtime_error("AGC driver: unregistered program is not a compute shader");
         APS5_LOG_ERR("Compute shader 0x%llx was not registered; preparing its artifact at dispatch", static_cast<unsigned long long>(snapshot.codeAddress));
+    }
+    if (snapshot.header.empty() || (snapshot.prepared->entries.empty() && request.shader.stage == ShaderRecompiler::ShaderStage::Compute)) {
         auto handle = ShaderRecompiler::PrepareShader(request);
         invocationRequest = request;
         invocationRequest.shader.code = ShaderRecompiler::GetPreparedCode(*handle);
@@ -376,7 +382,17 @@ std::vector<PreparedShaders::Entry> PrepareRegistered(const ShaderSnapshot& snap
         PerformanceTimer timing("Shader.PrepareArtifact");
         entries.push_back({codeOffset, ShaderRecompiler::PrepareShader(request)});
     };
-    append();
+    if (registration && compute) {
+        try {
+            append();
+        } catch (const std::runtime_error& error) {
+            const std::string_view reason(error.what());
+            APS5_LOG_ERR("Compute shader 0x%llx was not prepared at registration and is prepared at dispatch: %.*s", static_cast<unsigned long long>(snapshot.codeAddress), static_cast<int>(std::min<std::size_t>(reason.find('\n'), reason.size())), reason.data());
+            return {};
+        }
+    } else {
+        append();
+    }
     if (compute) {
         request.context.compute->partialThreads = {1, 1, 1};
         append();
