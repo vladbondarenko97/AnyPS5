@@ -1313,6 +1313,13 @@ bool StorageTexture::Refresh() {
             }
             unchanged = std::none_of(changed.begin(), changed.end(), [](bool value) { return value; });
         }
+        static const bool trustPending = std::getenv("APS5_TRUST_UNTRACKED_PENDING") != nullptr;
+        if (trustPending && !tracked && !compared && !keysChanged) {
+            for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) {
+                if (layerPending[layer]) changed[layer] = false;
+            }
+            unchanged = std::none_of(changed.begin(), changed.end(), [](bool value) { return value; });
+        }
         for (std::size_t k = 0; k < cpuBlocks.size(); ++k) {
             if (cpuBlocks[k] != 0 && (compared || (tracked && generations[k] != 0))) cpuWrote = true;
         }
