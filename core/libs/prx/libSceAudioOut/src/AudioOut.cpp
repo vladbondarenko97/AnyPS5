@@ -95,10 +95,6 @@ struct Port {
     SDL_AudioSpec spec = {};
 };
 
-#ifdef __APPLE__
-static constexpr std::uint32_t MACOS_MIN_DEVICE_SAMPLES = 2048;
-#endif
-
 static std::mutex g_mutex;
 static std::mutex g_outputMutex;
 static Port g_ports[PORTS_MAX];
@@ -115,19 +111,82 @@ static bool ensureSdlAudio() {
     return true;
 }
 
+struct Mixer {
+    std::mutex mutex;
+    SDL_AudioDeviceID device = 0;
+    SDL_AudioSpec spec = {};
+    int users = 0;
+    std::vector<std::uint8_t> queued[PORTS_MAX];
+};
+static Mixer g_mixer;
+
+static void mixPorts(void*, Uint8* stream, int length) {
+    auto* out = reinterpret_cast<float*>(stream);
+    const std::size_t samples = static_cast<std::size_t>(length) / sizeof(float);
+    std::fill(out, out + samples, 0.0f);
+    const std::lock_guard<std::mutex> lock(g_mixer.mutex);
+    for (auto& queued : g_mixer.queued) {
+        const std::size_t count = std::min(queued.size() / sizeof(float), samples);
+        for (std::size_t i = 0; i < count; i++) {
+            float sample;
+            std::memcpy(&sample, queued.data() + i * sizeof(float), sizeof(float));
+            out[i] += sample;
+        }
+        queued.erase(queued.begin(), queued.begin() + static_cast<std::ptrdiff_t>(count * sizeof(float)));
+    }
+    for (std::size_t i = 0; i < samples; i++) {
+        out[i] = std::clamp(out[i], -1.0f, 1.0f);
+    }
+}
+
+static bool mixed(const Port& port) {
+    return g_mixer.device != 0 && port.device == g_mixer.device;
+}
+
+static std::uint32_t queuedBytes(const Port& port) {
+    if (!mixed(port)) return SDL_GetQueuedAudioSize(port.device);
+    const std::lock_guard<std::mutex> lock(g_mixer.mutex);
+    return static_cast<std::uint32_t>(g_mixer.queued[&port - g_ports].size());
+}
+
+static void clearQueued(const Port& port) {
+    if (!mixed(port)) {
+        SDL_ClearQueuedAudio(port.device);
+        return;
+    }
+    const std::lock_guard<std::mutex> lock(g_mixer.mutex);
+    g_mixer.queued[&port - g_ports].clear();
+}
+
 static bool openDevice(Port& port) {
     if (!ensureSdlAudio()) {
         return false;
+    }
+    const char* driver = SDL_GetCurrentAudioDriver();
+    if (driver != nullptr && std::strcmp(driver, "coreaudio") == 0) {
+        if (g_mixer.device == 0) {
+            SDL_AudioSpec mixed{};
+            mixed.freq = static_cast<int>(port.freq);
+            mixed.format = AUDIO_F32SYS;
+            mixed.channels = 2;
+            mixed.samples = static_cast<Uint16>(port.samplesNum);
+            mixed.callback = mixPorts;
+            g_mixer.device = SDL_OpenAudioDevice(nullptr, 0, &mixed, &g_mixer.spec, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
+            if (g_mixer.device == 0) {
+                return false;
+            }
+            SDL_PauseAudioDevice(g_mixer.device, 0);
+        }
+        ++g_mixer.users;
+        port.device = g_mixer.device;
+        port.spec = g_mixer.spec;
+        return true;
     }
     SDL_AudioSpec desired{};
     desired.freq = static_cast<int>(port.freq);
     desired.format = sdlFormat(port.format);
     desired.channels = static_cast<Uint8>(port.channels);
-#ifdef __APPLE__
-    desired.samples = static_cast<Uint16>(std::max<std::uint32_t>(port.samplesNum, MACOS_MIN_DEVICE_SAMPLES));
-#else
     desired.samples = static_cast<Uint16>(port.samplesNum);
-#endif
     desired.callback = nullptr;
     SDL_AudioSpec obtained{};
     port.device = SDL_OpenAudioDevice(nullptr, 0, &desired, &obtained, SDL_AUDIO_ALLOW_ANY_CHANGE);
@@ -140,7 +199,13 @@ static bool openDevice(Port& port) {
 }
 
 static void closeDevice(Port& port) {
-    if (port.device != 0 && SDL_WasInit(SDL_INIT_AUDIO) != 0) {
+    if (mixed(port)) {
+        clearQueued(port);
+        if (--g_mixer.users == 0) {
+            if (SDL_WasInit(SDL_INIT_AUDIO) != 0) SDL_CloseAudioDevice(g_mixer.device);
+            g_mixer.device = 0;
+        }
+    } else if (port.device != 0 && SDL_WasInit(SDL_INIT_AUDIO) != 0) {
         SDL_ClearQueuedAudio(port.device);
         SDL_CloseAudioDevice(port.device);
     }
@@ -209,9 +274,9 @@ static void sleepUs(std::unique_lock<std::mutex>& lock, std::uint64_t us) {
 static void queueAudio(Port& port, const void* data, std::unique_lock<std::mutex>& lock) {
     if (data == nullptr) {
         const std::uint64_t waitStart = sceKernelGetProcessTime();
-        while (SDL_GetQueuedAudioSize(port.device) > 0) {
+        while (queuedBytes(port) > 0) {
             if (sceKernelGetProcessTime() - waitStart > DRAIN_TIMEOUT_US) {
-                SDL_ClearQueuedAudio(port.device);
+                clearQueued(port);
                 break;
             }
             sleepUs(lock, DRAIN_SLEEP_US);
@@ -259,15 +324,20 @@ static void queueAudio(Port& port, const void* data, std::unique_lock<std::mutex
     const std::uint32_t minQueued = queueSize * std::clamp(buffers, 2u, 16u);
     const std::uint64_t waitStart = sceKernelGetProcessTime();
 
-    while (SDL_GetQueuedAudioSize(port.device) > minQueued) {
+    while (queuedBytes(port) > minQueued) {
         if (sceKernelGetProcessTime() - waitStart > DRAIN_TIMEOUT_US) {
-            SDL_ClearQueuedAudio(port.device);
+            clearQueued(port);
             break;
         }
         sleepUs(lock, DRAIN_SLEEP_US);
     }
 
-    if (SDL_QueueAudio(port.device, queueData, queueSize) < 0) {
+    if (mixed(port)) {
+        const std::lock_guard<std::mutex> lock(g_mixer.mutex);
+        auto& queued = g_mixer.queued[&port - g_ports];
+        const auto* bytes = static_cast<const std::uint8_t*>(queueData);
+        queued.insert(queued.end(), bytes, bytes + queueSize);
+    } else if (SDL_QueueAudio(port.device, queueData, queueSize) < 0) {
         throw std::runtime_error(std::string("SDL_QueueAudio: ") + SDL_GetError());
     }
     // APS5_LOG_OUT("device=%u type=%d bytes=%u queued=%u", port.device, port.type, queueSize, SDL_GetQueuedAudioSize(port.device));
