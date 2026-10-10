@@ -94,6 +94,10 @@ struct Port {
     SDL_AudioSpec spec = {};
 };
 
+#ifdef __APPLE__
+static constexpr std::uint32_t MACOS_MIN_DEVICE_SAMPLES = 2048;
+#endif
+
 static std::mutex g_mutex;
 static Port g_ports[PORTS_MAX];
 static bool g_sdlInitialized = false;
@@ -117,7 +121,11 @@ static bool openDevice(Port& port) {
     desired.freq = static_cast<int>(port.freq);
     desired.format = sdlFormat(port.format);
     desired.channels = static_cast<Uint8>(port.channels);
+#ifdef __APPLE__
+    desired.samples = static_cast<Uint16>(std::max<std::uint32_t>(port.samplesNum, MACOS_MIN_DEVICE_SAMPLES));
+#else
     desired.samples = static_cast<Uint16>(port.samplesNum);
+#endif
     desired.callback = nullptr;
     SDL_AudioSpec obtained{};
     port.device = SDL_OpenAudioDevice(nullptr, 0, &desired, &obtained, SDL_AUDIO_ALLOW_ANY_CHANGE);
