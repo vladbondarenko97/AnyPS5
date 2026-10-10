@@ -1,3 +1,4 @@
+#include "prx/libc/include/General.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "ThreadOwned.hpp"
@@ -213,11 +214,23 @@ void Driver::execute(const Submission& submission) {
             CaptureTrace::Log("flip frame=%llu submission=%llu offset=%zu batch=%llu unsignaled=%llu", static_cast<unsigned long long>(frameSerial), static_cast<unsigned long long>(submission.serial), cursor, static_cast<unsigned long long>(batchesAtFlip), static_cast<unsigned long long>(unsignaledAtFlip));
             submission.flips.at(cursor)->GpuReady(frame);
         } else if (opcode == 0x15) {
-            timed(&WorkerProfile::dispatchMs, [&] { dispatch(queue, packet, submission); });
+            timed(&WorkerProfile::dispatchMs, [&] {
+                try {
+                    dispatch(queue, packet, submission);
+                } catch (const std::exception& error) {
+                    if (!PlaytestSkip_nid_no_patch("dispatch", error.what())) throw;
+                }
+            });
             Graphics::Recorder::CountRecordedWork();
             finishDispatchPacket(false);
         } else if (opcode == 0x16) {
-            timed(&WorkerProfile::dispatchMs, [&] { dispatchIndirect(queue, packet, submission); });
+            timed(&WorkerProfile::dispatchMs, [&] {
+                try {
+                    dispatchIndirect(queue, packet, submission);
+                } catch (const std::exception& error) {
+                    if (!PlaytestSkip_nid_no_patch("dispatch", error.what())) throw;
+                }
+            });
             Graphics::Recorder::CountRecordedWork();
             finishDispatchPacket(true);
         } else if (opcode == 0x3c || opcode == 0x93) {
@@ -263,7 +276,7 @@ void Driver::execute(const Submission& submission) {
                 } catch (const std::exception& error) {
                     CaptureTrace::Log("draw-error submission=%llu offset=%zu reason=%.256s", static_cast<unsigned long long>(submission.serial), cursor, error.what());
                     countSkip(Graphics::DrawSkip::Thrown);
-                    throw;
+                    if (!PlaytestSkip_nid_no_patch("draw", error.what())) throw;
                 }
             });
             finishDrawPacket(drawn);
