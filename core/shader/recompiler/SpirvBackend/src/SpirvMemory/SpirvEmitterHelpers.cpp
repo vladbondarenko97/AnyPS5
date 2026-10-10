@@ -248,7 +248,7 @@ void DefineInputs(SpirvEmitterState& state) {
             state.module.AddAnnotation(spv::OpDecorate, input.variableId, spv::DecorationBuiltIn, builtin);
         }
     }
-    if (state.requirements.subgroupLocalInvocationId) {
+    if (state.requirements.subgroupLocalInvocationId && !state.laneLocal) {
         const auto variable = DefineInterfaceVariable(state, TypeU32(state), spv::StorageClassInput, "gl_SubgroupInvocationID");
         state.subgroupLocalInvocationIdVariable = variable;
         state.module.AddAnnotation(spv::OpDecorate, variable, spv::DecorationBuiltIn, spv::BuiltInSubgroupLocalInvocationId);

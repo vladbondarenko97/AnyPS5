@@ -15,6 +15,7 @@ namespace ShaderRecompiler
     namespace {
 
         std::uint32_t HostInvocationId(SpirvEmitterState& state) {
+            if (state.laneLocal) return ConstantU32(state, 0u);
             if (state.subgroupLocalInvocationIdVariable == 0) {
                 FailEmit("SubgroupLocalInvocationId was not declared before function emission");
             }
@@ -54,6 +55,7 @@ namespace ShaderRecompiler
     }
 
     std::uint32_t EmitLaneShuffle(SpirvEmitterState& state, std::uint32_t type, std::uint32_t value, std::uint32_t lane) {
+        if (state.laneLocal) return value;
         const auto shuffled = state.module.AllocateId();
         state.module.AddFunction(spv::OpGroupNonUniformShuffle, type, shuffled, ConstantU32(state, spv::ScopeSubgroup), value, lane);
         return EmitConvergentResult(state, type, shuffled);
@@ -61,6 +63,12 @@ namespace ShaderRecompiler
 
     std::uint32_t EmitLaneBallot(SpirvEmitterState& state, std::uint32_t predicate) {
         const auto ballot = state.module.AllocateId();
+        if (state.laneLocal) {
+            const auto bit = state.module.AllocateId();
+            state.module.AddFunction(spv::OpSelect, TypeU32(state), bit, predicate, ConstantU32(state, 1u), ConstantU32(state, 0u));
+            state.module.AddFunction(spv::OpCompositeConstruct, TypeU32Vector(state, 4u), ballot, bit, ConstantU32(state, 0u), ConstantU32(state, 0u), ConstantU32(state, 0u));
+            return ballot;
+        }
         state.module.AddFunction(spv::OpGroupNonUniformBallot, TypeU32Vector(state, 4u), ballot, ConstantU32(state, spv::ScopeSubgroup), predicate);
         return EmitConvergentResult(state, TypeU32Vector(state, 4u), ballot);
     }
