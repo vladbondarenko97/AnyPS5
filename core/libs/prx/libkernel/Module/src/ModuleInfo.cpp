@@ -8,7 +8,11 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
-#if !defined(_WIN32) && !defined(__APPLE__)
+#ifdef __APPLE__
+#include <dlfcn.h>
+#include "prx/libc/include/specifics/linux/ElfTypes.hpp"
+#include "prx/libc/include/specifics/macos/ExecutablePath.hpp"
+#elif !defined(_WIN32)
 #include <dlfcn.h>
 #include <link.h>
 #include <unistd.h>
@@ -18,7 +22,11 @@ extern "C" std::int32_t ModuleIdForImage_nid_no_patch(const void* native);
 
 namespace {
 
-#if !defined(_WIN32) && !defined(__APPLE__)
+#ifndef _WIN32
+#ifdef __APPLE__
+constexpr std::uint32_t PF_R = 4;
+constexpr std::uint32_t PT_TLS = 7;
+#endif
 constexpr char GuestModuleSuffix[] = ".guest.prx";
 constexpr std::int32_t ProtRead = 1;
 constexpr std::int32_t ProtWrite = 2;
@@ -99,12 +107,16 @@ std::uint64_t EhFrameSize(const dl_phdr_info& image, std::uintptr_t frame) {
 
 std::string ImageName(const dl_phdr_info& image) {
     std::string path = image.dlpi_name ? image.dlpi_name : "";
+#ifdef __APPLE__
+    if (path.empty()) path = MacOsExecutablePath().string();
+#else
     if (path.empty()) {
         char executable[4096];
         const auto length = ::readlink("/proc/self/exe", executable, sizeof(executable) - 1);
         if (length < 0) throw std::runtime_error("sceKernelGetModuleInfoFromAddr: cannot resolve the executable path");
         path.assign(executable, static_cast<std::size_t>(length));
     }
+#endif
     std::string name = path.substr(path.find_last_of('/') + 1);
     if (name.size() > sizeof(GuestModuleSuffix) - 1 && name.ends_with(GuestModuleSuffix))
         name.resize(name.size() - (sizeof(GuestModuleSuffix) - 1));
@@ -116,7 +128,9 @@ void Fill(const dl_phdr_info& image, ModuleInfoEx& info) {
     if (name.size() >= sizeof(info.name))
         throw std::runtime_error("sceKernelGetModuleInfoFromAddr: module name too long: " + name);
     std::memcpy(info.name, name.c_str(), name.size() + 1);
+#ifndef __APPLE__
     info.tls_index = ToU32(image.dlpi_tls_modid, "TLS module index");
+#endif
     for (std::uint16_t i = 0; i < image.dlpi_phnum; ++i) {
         const auto& header = image.dlpi_phdr[i];
         const std::uintptr_t address = image.dlpi_addr + header.p_vaddr;
@@ -135,12 +149,15 @@ void Fill(const dl_phdr_info& image, ModuleInfoEx& info) {
             info.eh_frame_hdr_size = ToU32(header.p_memsz, "eh_frame_hdr size");
             info.eh_frame_addr = EhFrameAddress(image, address);
             info.eh_frame_size = ToU32(EhFrameSize(image, info.eh_frame_addr), "eh_frame size");
-        } else if (header.p_type == PT_DYNAMIC) {
+        }
+#ifndef __APPLE__
+        else if (header.p_type == PT_DYNAMIC) {
             for (const auto* entry = reinterpret_cast<const ElfW(Dyn)*>(address); entry->d_tag != DT_NULL; ++entry) {
                 if (entry->d_tag == DT_INIT) info.init_proc_addr = image.dlpi_addr + entry->d_un.d_ptr;
                 else if (entry->d_tag == DT_FINI) info.fini_proc_addr = image.dlpi_addr + entry->d_un.d_ptr;
             }
         }
+#endif
     }
     info.ref_count = 1;
 }
@@ -161,11 +178,20 @@ extern "C" {
 int APS5_VABI sceKernelGetModuleInfoFromAddr(std::uint64_t address, int flags, ModuleInfoEx* info) {
     if (!info) return SCE_KERNEL_ERROR_EFAULT;
     if (flags != 2) throw std::invalid_argument("sceKernelGetModuleInfoFromAddr: unsupported flags " + std::to_string(flags));
-    if (info->st_size != sizeof(ModuleInfoEx))
-        throw std::invalid_argument("sceKernelGetModuleInfoFromAddr: unsupported st_size " + std::to_string(info->st_size));
-#if defined(_WIN32) || defined(__APPLE__)
+#ifdef _WIN32
     (void)address;
     NotImplemented_nid_no_patch(__func__);
+    return 0;
+#elif defined(__APPLE__)
+    ModuleInfoEx result{};
+    result.st_size = sizeof(ModuleInfoEx);
+    ImageSearch search{static_cast<std::uintptr_t>(address), &result, false};
+    dl_iterate_phdr(FindImage, &search);
+    if (!search.found) return SCE_KERNEL_ERROR_ESRCH;
+    Dl_info image{};
+    if (!dladdr(reinterpret_cast<const void*>(address), &image) || image.dli_fbase == nullptr) return SCE_KERNEL_ERROR_ESRCH;
+    result.id = ModuleIdForImage_nid_no_patch(image.dli_fbase);
+    *info = result;
     return 0;
 #else
     Dl_info symbol{};
