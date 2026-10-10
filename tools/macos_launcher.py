@@ -6,7 +6,8 @@ Without an argument a folder picker opens and failures are shown in a dialog. Th
 title's executable (eboot.bin or one .elf), its sce_module, sce_modules or prx directory and its
 data. Fake-signed SELF containers are unwrapped to ELF; encrypted ones are refused. The relinker and
 the prx libraries come from the full build in build/, the Vulkan loader and MoltenVK from VULKAN_SDK
-or the newest ~/VulkanSDK/<version>/macOS. The application is written to build/launcher/."""
+or the newest ~/VulkanSDK/<version>/macOS. The application is written to build/launcher/ and starts with
+APS5_TRUST_UNTRACKED_PENDING=1 (see TechnicalDebt.md)."""
 import os
 import shutil
 import struct
@@ -111,6 +112,14 @@ def convert(source):
     subprocess.run([relinker, "--macos", "--to-intel", staged / "eboot.elf", relinked / "eboot"], check=True, capture_output=True, text=True)
     subprocess.run([sys.executable, ROOT / "tools" / "package_macos_app.py", "--relinked", relinked, "--game", title,
                     "--libs", libs, "--vulkan", vulkan, bundle], check=True, capture_output=True, text=True)
+    # ponytail: macOS has no guest write tracking yet, so every render target round-trips through
+    # guest memory each frame; this trusts that the CPU leaves pending targets alone. Drop the line
+    # for a title that draws wrong, and the whole block once the port tracks writes.
+    launch = bundle / "Contents" / "MacOS" / "launch"
+    script = launch.read_text()
+    if script.count('cd "$run"') != 1:
+        raise RuntimeError(f"Unexpected launch script in {bundle}")
+    launch.write_text(script.replace('cd "$run"', 'export APS5_TRUST_UNTRACKED_PENDING=1\ncd "$run"'))
     return bundle
 
 
