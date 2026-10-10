@@ -131,6 +131,7 @@ std::uint32_t SpirvValueEmitContext::Ballot(const IrValue* predicate) {
 }
 
 std::uint32_t SpirvValueEmitContext::FirstLane(std::uint32_t ballot) {
+    if (state.laneLocal) return ConstantU32(state, 0u);
     if (otherHalf == nullptr) {
         const auto result = state.module.AllocateId();
         state.module.AddFunction(spv::OpGroupNonUniformBallotFindLSB, TypeU32(state), result, ConstantU32(state, spv::ScopeSubgroup), ballot);
@@ -240,8 +241,9 @@ std::vector<std::uint32_t> SpirvEmitter::Emit(const IrProgram& program, const Sh
     state.supportedExtensions = target.supportedExtensions;
     state.nonConstantImageOffsets = target.nonConstantImageOffsets;
     state.narrowSubgroupClock = target.narrowSubgroupClock;
-    state.hostSubgroupSize = target.subgroupSize;
-    state.splitSubgroup = program.WaveSize() == 32u && target.subgroupSize > 32u;
+    state.laneLocal = program.Resources().stage == IrShaderStage::Vertex && !target.vertexStageSubgroups;
+    state.hostSubgroupSize = state.laneLocal ? 1u : target.subgroupSize;
+    state.splitSubgroup = !state.laneLocal && program.WaveSize() == 32u && target.subgroupSize > 32u;
     if (state.splitSubgroup && (state.requirements.subgroupBallot || state.requirements.subgroupShuffle)) state.requirements.subgroupLocalInvocationId = true;
     const auto* workgroup = ShaderWorkgroupInputFor(state);
     state.laneCount = workgroup != nullptr && program.WaveSize() == 64u && workgroup->hostSubgroupSize == 32u ? 2u : 1u;

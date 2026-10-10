@@ -88,6 +88,7 @@ struct SpirvEmitterState {
     std::uint32_t laneCount = 1;
     std::uint32_t hostSubgroupSize = 0;
     bool splitSubgroup = false;
+    bool laneLocal = false;
     bool narrowSubgroupClock = false;
     std::unordered_set<const IrValue*> sharedLaneValues;
     std::uint32_t laneHalf = 0;

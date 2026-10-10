@@ -118,13 +118,13 @@ void DefineModule(SpirvEmitterState& state) {
     if (state.requirements.imageGatherExtended) {
         state.module.EmitCapability(spv::CapabilityImageGatherExtended);
     }
-    if (state.laneCount == 2 || state.requirements.subgroupBallot || state.requirements.subgroupShuffle || state.requirements.subgroupLocalInvocationId) {
+    if (!state.laneLocal && (state.laneCount == 2 || state.requirements.subgroupBallot || state.requirements.subgroupShuffle || state.requirements.subgroupLocalInvocationId)) {
         state.module.EmitCapability(spv::CapabilityGroupNonUniform);
     }
-    if (state.laneCount == 2 || state.requirements.subgroupBallot) {
+    if (!state.laneLocal && (state.laneCount == 2 || state.requirements.subgroupBallot)) {
         state.module.EmitCapability(spv::CapabilityGroupNonUniformBallot);
     }
-    if (state.requirements.subgroupShuffle) {
+    if (!state.laneLocal && state.requirements.subgroupShuffle) {
         state.module.EmitCapability(spv::CapabilityGroupNonUniformShuffle);
     }
     if (state.requirements.computeDerivatives && StageOf(state) == IrShaderStage::Compute) {
