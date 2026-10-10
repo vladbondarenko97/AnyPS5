@@ -1,3 +1,4 @@
+#include "prx/libc/include/General.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "ThreadOwned.hpp"
@@ -237,8 +238,14 @@ void Driver::execute(const Submission& submission) {
                 gateOpened() = false;
                 timed(&WorkerProfile::dispatchMs, [&] { resolveGroupAhead(submission, queue, cursor); });
             }
-            if (opcode == 0x15) timed(&WorkerProfile::dispatchMs, [&] { dispatch(queue, packet, submission); });
-            else timed(&WorkerProfile::dispatchMs, [&] { dispatchIndirect(queue, packet, submission); });
+            timed(&WorkerProfile::dispatchMs, [&] {
+                try {
+                    if (opcode == 0x15) dispatch(queue, packet, submission);
+                    else dispatchIndirect(queue, packet, submission);
+                } catch (const std::exception& error) {
+                    if (!PlaytestSkip_nid_no_patch("dispatch", error.what())) throw;
+                }
+            });
             Graphics::Recorder::CountRecordedWork();
             finishDispatchPacket(opcode == 0x16);
         } else if (opcode == 0x3c || opcode == 0x93) {
@@ -286,7 +293,7 @@ void Driver::execute(const Submission& submission) {
                 } catch (const std::exception& error) {
                     CaptureTrace::Log("draw-error submission=%llu offset=%zu reason=%.256s", static_cast<unsigned long long>(submission.serial), cursor, error.what());
                     countSkip(Graphics::DrawSkip::Thrown);
-                    throw;
+                    if (!PlaytestSkip_nid_no_patch("draw", error.what())) throw;
                 }
             });
             finishDrawPacket(drawn);

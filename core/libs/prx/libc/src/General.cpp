@@ -1,3 +1,6 @@
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -354,6 +357,23 @@ extern "C" char* APS5_VABI getcwd_nid_postfix(char* buffer, std::size_t size) {
       catch (const std::filesystem::filesystem_error& error) { errno = DirectoryFailure(error.code()); return nullptr; }
 }
 
+extern "C" bool PlaytestSkip_nid_no_patch(const char* kind, const char* reason) {
+    static const bool enabled = std::getenv("APS5_PLAYTEST") != nullptr;
+    if (!enabled) return false;
+    static std::mutex mutex;
+    static std::set<std::string> reported;
+    std::string line(reason);
+    line.resize(std::min(line.find('\n'), line.size()));
+    const std::lock_guard lock(mutex);
+    if (reported.insert(kind + (": " + line)).second) {
+        std::fprintf(stderr, "[playtest] %s skipped: %s\n", kind, line.c_str());
+        std::fflush(stderr);
+    }
+    return true;
+}
+
 extern "C" void NotImplemented_nid_no_patch(const char* funcName) {
-    throw std::runtime_error(std::string(funcName) + " not implemented");
+    const auto reason = std::string(funcName) + " not implemented";
+    if (PlaytestSkip_nid_no_patch("call", reason.c_str())) return;
+    throw std::runtime_error(reason);
 }

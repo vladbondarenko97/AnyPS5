@@ -7,7 +7,7 @@ title's executable (eboot.bin or one .elf), its sce_module, sce_modules or prx d
 data. Fake-signed SELF containers are unwrapped to ELF; encrypted ones are refused. The relinker and
 the prx libraries come from the full build in build/, the Vulkan loader and MoltenVK from VULKAN_SDK
 or the newest ~/VulkanSDK/<version>/macOS. The application is written to build/launcher/ and starts with
-APS5_TRUST_UNTRACKED_PENDING=1 (see TechnicalDebt.md)."""
+APS5_TRUST_UNTRACKED_PENDING=1 and APS5_PLAYTEST=1 (see TechnicalDebt.md)."""
 import os
 import shutil
 import struct
@@ -115,11 +115,12 @@ def convert(source):
     # ponytail: macOS has no guest write tracking yet, so every render target round-trips through
     # guest memory each frame; this trusts that the CPU leaves pending targets alone. Drop the line
     # for a title that draws wrong, and the whole block once the port tracks writes.
+    # APS5_PLAYTEST=1 logs unimplemented calls and failed draws as "[playtest] ..." and goes on.
     launch = bundle / "Contents" / "MacOS" / "launch"
     script = launch.read_text()
     if script.count('cd "$run"') != 1:
         raise RuntimeError(f"Unexpected launch script in {bundle}")
-    launch.write_text(script.replace('cd "$run"', 'export APS5_TRUST_UNTRACKED_PENDING=1\ncd "$run"'))
+    launch.write_text(script.replace('cd "$run"', 'export APS5_TRUST_UNTRACKED_PENDING=1\nexport APS5_PLAYTEST=1\ncd "$run"'))
     return bundle
 
 

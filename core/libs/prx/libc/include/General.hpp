@@ -10,6 +10,9 @@
 #include "general/ExportMacros.hpp"
 
 extern "C" void NotImplemented_nid_no_patch(const char* funcName);
+// True under APS5_PLAYTEST=1, after writing "[playtest] <kind> skipped: <reason>" to stderr once per reason;
+// the caller then leaves out what it could not do instead of throwing.
+extern "C" bool PlaytestSkip_nid_no_patch(const char* kind, const char* reason);
 extern "C" void CxaFinalize_nid_no_patch(void* dsoHandle);
 extern "C" bool StopAtPrefixLetter_nid_no_patch(const char* str, char** endptr, int base);
 
