@@ -884,6 +884,11 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
         VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &hostProperties};
         state->InstanceFunction<PFN_vkGetPhysicalDeviceProperties2>("vkGetPhysicalDeviceProperties2")(selected, &properties);
         state->hostImportAlignment = hostProperties.minImportedHostPointerAlignment;
+#ifdef __APPLE__
+        // Under Rosetta the process and MoltenVK see 4 KiB pages, but a Metal buffer over host memory
+        // has to start and end on the hardware's 16 KiB pages; an import that does not loses the device.
+        state->hostImportAlignment = std::max<VkDeviceSize>(state->hostImportAlignment, 16384);
+#endif
 #ifdef _WIN32
         // Imported pages are locked; locking is bounded by the process working-set minimum.
         if (const char* value = std::getenv("APS5_WORKING_SET_MIB")) {

@@ -10,6 +10,13 @@
 #include <utility>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <cstring>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <sys/mman.h>
+#endif
+
 #if defined(__linux__)
 #include <cerrno>
 #include <cstring>
@@ -26,6 +33,7 @@ namespace GuestWriteWatch {
 namespace {
 
 #if defined(__linux__) && defined(PAGEMAP_SCAN) && defined(UFFD_FEATURE_WP_ASYNC)
+#define APS5_GUEST_WRITE_WATCH
 constexpr std::uintptr_t PageBytes = 4096;
 
 class Watch {
@@ -250,12 +258,191 @@ private:
 };
 
 const bool g_opened = (Watch::Get(), true);
+#elif defined(__APPLE__)
+#define APS5_GUEST_WRITE_WATCH
+// macOS offers no write tracking a Rosetta-translated title survives: a write fault on a protected
+// page makes Rosetta abort inside some translated AVX stores, and copy-on-write snapshots cost as
+// much as comparing the memory. This watch compares instead. A collect of up to ExactBytes (buffers
+// and small textures, where one changed constant matters) compares every byte of its 16 KiB pages
+// with a copy kept at MirrorBase + address; a larger one (a big texture) compares SampleBytes of
+// every page, and calls the page written when they changed since the last collect of that kind.
+// ponytail: a write to a large range that leaves the sampled bytes as they were is not seen, and
+// the copies cost as much memory as the small ranges collected; sample more, or replace this, if a
+// title shows stale textures.
+constexpr std::uintptr_t PageBytes = 16384;
+constexpr std::uintptr_t SampleBytes = 32;
+constexpr std::uintptr_t TableEnd = std::uintptr_t{1} << 40;
+constexpr std::uintptr_t ExactBytes = 8u << 20;
+constexpr unsigned char SampleKnown = 1;
+constexpr unsigned char CopyKnown = 2;
+
+class Watch {
+public:
+    static Watch& Get() {
+        static Watch watch;
+        return watch;
+    }
+
+    bool Available() const {
+        return _samples != nullptr;
+    }
+
+    void Register(std::uintptr_t begin, std::uintptr_t end) {
+        if (!Available() || end <= begin || end > TableEnd) return;
+        std::unique_lock lock(_lock);
+        remove(_ranges, begin, end);
+        insert(_ranges, begin, end);
+        forget(begin, end);
+    }
+
+    bool Unregister(std::uintptr_t begin, std::uintptr_t end) {
+        if (!Available() || end <= begin) return false;
+        std::unique_lock lock(_lock);
+        const bool watched = remove(_ranges, begin, end);
+        forget(begin, std::min(end, TableEnd));
+        return watched;
+    }
+
+    bool Covers(std::uintptr_t begin, std::uintptr_t end) {
+        if (!Available()) return false;
+        std::shared_lock lock(_lock);
+        return covers(begin, end);
+    }
+
+    bool Collect(std::uintptr_t begin, std::uintptr_t end, void (*written)(void*, std::uintptr_t, std::uintptr_t), void* context) {
+        if (!Available()) return false;
+        begin &= ~(PageBytes - 1);
+        end = (end + PageBytes - 1) & ~(PageBytes - 1);
+        if (end <= begin) return true;
+        std::shared_lock lock(_lock);
+        if (!covers(begin, end)) return false;
+        // Memory the title cannot read is not sampled; it counts as written.
+        if (!readable(begin, end)) {
+            forget(begin, end);
+            written(context, begin, end);
+            return true;
+        }
+        std::lock_guard samples(_sampleLock);
+        const bool exact = _mirror != nullptr && end - begin <= ExactBytes;
+        std::uintptr_t run = 0;
+        for (auto page = begin; page < end; page += PageBytes) {
+            const auto index = page / PageBytes;
+            bool changed;
+            if (exact) {
+                const auto* guest = reinterpret_cast<const unsigned char*>(page);
+                changed = (_known[index] & CopyKnown) == 0 || std::memcmp(guest, _mirror + page, PageBytes) != 0;
+                if (changed) std::memcpy(_mirror + page, guest, PageBytes);
+                _known[index] |= CopyKnown;
+            } else {
+                // The sample sits at an offset that differs from page to page.
+                const auto* guest = reinterpret_cast<const unsigned char*>(page + (index * 0x9e3779b97f4a7c15ull >> 50u) % (PageBytes - SampleBytes));
+                auto* sample = _samples + index * SampleBytes;
+                changed = (_known[index] & SampleKnown) == 0 || std::memcmp(guest, sample, SampleBytes) != 0;
+                if (changed) std::memcpy(sample, guest, SampleBytes);
+                _known[index] |= SampleKnown;
+            }
+            if (changed) {
+                if (run == 0) run = page;
+            } else if (run != 0) {
+                written(context, run, page);
+                run = 0;
+            }
+        }
+        if (run != 0) written(context, run, end);
+        return true;
+    }
+
+private:
+    Watch() {
+        if (std::getenv("APS5_NO_WRITE_WATCH") != nullptr) return;
+        const auto pages = TableEnd / PageBytes;
+        void* known = ::mmap(nullptr, pages, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
+        void* samples = ::mmap(nullptr, pages * SampleBytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
+        if (known == MAP_FAILED || samples == MAP_FAILED) return;
+        _known = static_cast<unsigned char*>(known);
+        _samples = static_cast<unsigned char*>(samples);
+        // Without the address space for the copies every collect samples.
+        void* mirror = ::mmap(nullptr, TableEnd, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
+        if (mirror != MAP_FAILED) _mirror = static_cast<unsigned char*>(mirror);
+    }
+
+    // The pages of the range count as written at their next collect.
+    void forget(std::uintptr_t begin, std::uintptr_t end) {
+        begin &= ~(PageBytes - 1);
+        end = (end + PageBytes - 1) & ~(PageBytes - 1);
+        std::lock_guard samples(_sampleLock);
+        if (begin >= end) return;
+        std::memset(_known + begin / PageBytes, 0, (end - begin) / PageBytes);
+        if (_mirror != nullptr) ::madvise(_mirror + begin, end - begin, MADV_FREE);
+    }
+
+    static bool readable(std::uintptr_t begin, std::uintptr_t end) {
+        for (auto cursor = begin; cursor < end;) {
+            auto base = static_cast<mach_vm_address_t>(cursor);
+            mach_vm_size_t size = 0;
+            vm_region_basic_info_data_64_t info {};
+            mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+            mach_port_t object = MACH_PORT_NULL;
+            if (mach_vm_region(mach_task_self(), &base, &size, VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&info), &count, &object) != KERN_SUCCESS) return false;
+            if (base > cursor || (info.protection & VM_PROT_READ) == 0) return false;
+            cursor = base + size;
+        }
+        return true;
+    }
+
+    bool covers(std::uintptr_t begin, std::uintptr_t end) const {
+        auto next = _ranges.upper_bound(begin);
+        if (next == _ranges.begin()) return false;
+        return std::prev(next)->second >= end;
+    }
+
+    static void insert(std::map<std::uintptr_t, std::uintptr_t>& ranges, std::uintptr_t begin, std::uintptr_t end) {
+        auto next = ranges.upper_bound(begin);
+        if (next != ranges.begin() && std::prev(next)->second == begin) {
+            begin = std::prev(next)->first;
+            ranges.erase(std::prev(next));
+        }
+        if (next != ranges.end() && next->first == end) {
+            end = next->second;
+            ranges.erase(next);
+        }
+        ranges.emplace(begin, end);
+    }
+
+    static bool remove(std::map<std::uintptr_t, std::uintptr_t>& ranges, std::uintptr_t begin, std::uintptr_t end) {
+        bool removed = false;
+        auto it = ranges.upper_bound(begin);
+        if (it != ranges.begin()) --it;
+        while (it != ranges.end() && it->first < end) {
+            const auto rangeBegin = it->first;
+            const auto rangeEnd = it->second;
+            if (rangeEnd <= begin) {
+                ++it;
+                continue;
+            }
+            removed = true;
+            it = ranges.erase(it);
+            if (rangeBegin < begin) ranges.emplace(rangeBegin, begin);
+            if (rangeEnd > end) ranges.emplace(end, rangeEnd);
+        }
+        return removed;
+    }
+
+    unsigned char* _known = nullptr;
+    unsigned char* _samples = nullptr;
+    unsigned char* _mirror = nullptr;
+    std::shared_mutex _lock;
+    std::mutex _sampleLock;
+    std::map<std::uintptr_t, std::uintptr_t> _ranges;
+};
+
+const bool g_opened = (Watch::Get(), true);
 #endif
 
 }
 
 bool GuestWriteWatchAvailable_nid_postfix() {
-#if defined(__linux__) && defined(PAGEMAP_SCAN) && defined(UFFD_FEATURE_WP_ASYNC)
+#ifdef APS5_GUEST_WRITE_WATCH
     return Watch::Get().Available();
 #else
     return false;
@@ -263,7 +450,7 @@ bool GuestWriteWatchAvailable_nid_postfix() {
 }
 
 void GuestWriteWatchRegister_nid_postfix(const void* pointer, std::size_t bytes) {
-#if defined(__linux__) && defined(PAGEMAP_SCAN) && defined(UFFD_FEATURE_WP_ASYNC)
+#ifdef APS5_GUEST_WRITE_WATCH
     const auto begin = reinterpret_cast<std::uintptr_t>(pointer);
     Watch::Get().Register(begin, begin + bytes);
 #else
@@ -273,7 +460,7 @@ void GuestWriteWatchRegister_nid_postfix(const void* pointer, std::size_t bytes)
 }
 
 bool GuestWriteWatchUnregister_nid_postfix(const void* pointer, std::size_t bytes) {
-#if defined(__linux__) && defined(PAGEMAP_SCAN) && defined(UFFD_FEATURE_WP_ASYNC)
+#ifdef APS5_GUEST_WRITE_WATCH
     const auto begin = reinterpret_cast<std::uintptr_t>(pointer);
     return Watch::Get().Unregister(begin, begin + bytes);
 #else
@@ -284,7 +471,7 @@ bool GuestWriteWatchUnregister_nid_postfix(const void* pointer, std::size_t byte
 }
 
 bool GuestWriteWatchCovers_nid_postfix(std::uintptr_t address, std::size_t bytes) {
-#if defined(__linux__) && defined(PAGEMAP_SCAN) && defined(UFFD_FEATURE_WP_ASYNC)
+#ifdef APS5_GUEST_WRITE_WATCH
     return bytes != 0 && address + bytes > address && Watch::Get().Covers(address, address + bytes);
 #else
     static_cast<void>(address);
@@ -294,7 +481,7 @@ bool GuestWriteWatchCovers_nid_postfix(std::uintptr_t address, std::size_t bytes
 }
 
 bool GuestWriteWatchCollect_nid_postfix(std::uintptr_t address, std::size_t bytes, void (*written)(void* context, std::uintptr_t begin, std::uintptr_t end), void* context) {
-#if defined(__linux__) && defined(PAGEMAP_SCAN) && defined(UFFD_FEATURE_WP_ASYNC)
+#ifdef APS5_GUEST_WRITE_WATCH
     if (bytes == 0 || address + bytes < address) return false;
     return Watch::Get().Collect(address, address + bytes, written, context);
 #else
