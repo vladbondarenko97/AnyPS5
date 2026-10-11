@@ -12,8 +12,42 @@ LEGO Builder's Journey (PPSA05496, Unity HDRP). Known limits of each change are 
   between 3.4 and 6.5 inside one run.
 - The first launch spends several minutes compiling large compute pipelines through Metal; later
   launches load them from the pipeline cache.
-- Nothing is pushed. The work is three local commits on `macos-port`: `d21fdcca`, `82c4cc82`,
-  `66005779`.
+- This branch sits on the port's old base (`2861c1ad`). The port author merged `main` into
+  `macos-port` on 2026-10-11 (`21930ce5`, 1242 commits); the next section says what has moved.
+
+## Moving to the current base (2026-10-11)
+
+`macos-port-next` is the port's current `macos-port` plus the commits below, replayed one at a time.
+It builds, passes `ctest` (716 tests; `guest_socket_read_write` fails about 1 run in 20 on its own)
+and the byte-built guest fixtures. Doom (PPSA99666) draws at 60 frames per second on it. Cloudberry
+Kingdom (PPSA23827) presents 60 black frames per second: see the first to-do.
+
+| Change | State on `macos-port-next` |
+| --- | --- |
+| `kqueue` and `kevent` | Replayed; open as pull request 7 on the port |
+| `sceKernelGetModuleInfoFromAddr` on macOS | Re-ported onto the rewritten `ModuleInfo.cpp`; open as pull request 8 |
+| Typed image heaps without `nullDescriptor` | Taken from upstream, where it merged as #2015 |
+| Launcher (`tools/macos_launcher.py`) | Replayed |
+| One lane per invocation in vertex shaders | Replayed; request serialization is now version 16 |
+| Viewport depth clamp without a depth target | Replayed, and applied to the back-face pass upstream added |
+| `APS5_TRUST_UNTRACKED_PENDING` and its launcher switch | Replayed |
+| Audio: 2048-sample devices, one mixed device | Replayed; the mixer now applies to SDL's `coreaudio` driver only, so `audio_out_mix_level_pad_spk` passes |
+| `APS5_PLAYTEST` | Replayed |
+| Compute shader prepared at dispatch | Dropped: upstream prepares in the background and defers the failure |
+| Per-vertex fragment inputs off on MoltenVK | Dropped: upstream has it as `FragmentShaderBarycentricUsable` |
+| Relinker fix #1529, write watch #1686 and #1960 | Dropped: all three are in the base |
+| Write watch revert and the software write watch (`82c4cc82`) | Not moved. The base has the protection-based watch this branch reverted, so the software watch has to be redone as an alternative backend for translated processes |
+| Unity boot (`d21fdcca`) | Not moved. It conflicts in 15 files and holds about fifteen separate fixes; each goes over as its own change |
+| 1080p for Unity titles (`66005779`) | Not moved; it follows the two above |
+
+To do there, in order:
+
+1. Cloudberry Kingdom draws nothing. Upstream `4a2e6054` emulates fragment barycentrics with a
+   generated geometry stage when `VK_KHR_fragment_shader_barycentric` is off, and Metal has no
+   geometry shaders, so those draws throw (`APS5_PLAYTEST` turns the throw into a skipped draw).
+   The base needs a path for devices with neither.
+2. The software write watch as a backend chosen for translated processes.
+3. The fixes inside `d21fdcca`, one topic at a time, each as a pull request to the port.
 
 ## Changelog
 
