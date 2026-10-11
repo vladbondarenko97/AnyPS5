@@ -2451,8 +2451,13 @@ double VulkanDevice::FinishPresent() {
     return RetirePresents(0);
 }
 
+namespace {
+void gpuTimesFrame();
+}
+
 void VulkanDevice::QueuePresent() {
     if (!state->queuePending) return;
+    gpuTimesFrame();
     PerformanceTimer timing("Vulkan.QueuePresent");
     state->queuePending = false;
     const auto index = state->queueIndex;
@@ -2589,11 +2594,96 @@ void VulkanDevice::ColorMetadataPass(const Graphics::ColorMetadataPass& pass) {
     Graphics::RunColorMetadataPass(graphicsContext(), pass);
 }
 
+namespace {
+
+// Debug aid: APS5_GPU_TIMES=<frames> times every draw and dispatch on the GPU by draining the
+// device before and after it (so the run is far slower), and prints the commands that took the most
+// time, averaged per frame, every <frames> presented frames as [gputime] lines.
+struct GpuTimes {
+    struct Entry {
+        double ms = 0;
+        std::uint64_t count = 0;
+        std::size_t words = 0;
+        std::uint32_t x = 0, y = 0, z = 0;
+    };
+    std::mutex mutex;
+    std::map<std::pair<int, std::uint64_t>, Entry> entries;
+    std::uint64_t frames = 0;
+
+    static int Frames() {
+        static const int frames = [] {
+            const char* value = std::getenv("APS5_GPU_TIMES");
+            return value != nullptr ? std::max(1, std::atoi(value)) : 0;
+        }();
+        return frames;
+    }
+
+    static std::uint64_t Hash(std::span<const std::uint32_t> spirv) {
+        std::uint64_t hash = 0xcbf29ce484222325ull ^ spirv.size();
+        for (const auto word : spirv) hash = (hash ^ word) * 0x100000001b3ull;
+        return hash;
+    }
+
+    void Add(int kind, std::span<const std::uint32_t> spirv, double ms, std::uint32_t x, std::uint32_t y, std::uint32_t z) {
+        const std::lock_guard lock(mutex);
+        auto& entry = entries[{kind, Hash(spirv)}];
+        entry.ms += ms;
+        ++entry.count;
+        entry.words = spirv.size();
+        entry.x = x, entry.y = y, entry.z = z;
+    }
+
+    void Frame() {
+        const std::lock_guard lock(mutex);
+        if (++frames < static_cast<std::uint64_t>(Frames())) return;
+        std::vector<std::pair<std::pair<int, std::uint64_t>, Entry>> sorted(entries.begin(), entries.end());
+        std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.second.ms > b.second.ms; });
+        double total = 0;
+        for (const auto& [key, entry] : sorted) total += entry.ms;
+        std::fprintf(stderr, "[gputime] %llu frames, %.1f ms per frame in %zu distinct shaders (each command drained, so times include the drain)\n", static_cast<unsigned long long>(frames), total / frames, sorted.size());
+        for (std::size_t i = 0; i < std::min<std::size_t>(sorted.size(), 14); ++i) {
+            const auto& [key, entry] = sorted[i];
+            std::fprintf(stderr, "[gputime] %2zu %-8s shader %016llx %8zu words: %7.2f ms per frame, %5.1f calls per frame, %7.2f ms per call, last size %ux%ux%u\n", i + 1, key.first == 0 ? "dispatch" : key.first == 1 ? "indirect" : "draw", static_cast<unsigned long long>(key.second), entry.words, entry.ms / frames, static_cast<double>(entry.count) / frames, entry.ms / entry.count, entry.x, entry.y, entry.z);
+        }
+        entries.clear();
+        frames = 0;
+    }
+};
+
+GpuTimes& gpuTimes() {
+    static GpuTimes times;
+    return times;
+}
+
+void gpuTimesFrame() {
+    if (GpuTimes::Frames() != 0) gpuTimes().Frame();
+}
+
+}
+
 void VulkanDevice::Draw(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::shared_ptr<const DrawRecipe>* recipe) {
     for (const auto& shader : shaders) {
         require(shader.program != nullptr, "missing compiled shader");
         ShaderRecompiler::RuntimeAbi::RequireVersion(shader.program->runtimeAbiVersion);
     }
+    struct TimedDraw {
+        VulkanDevice& device;
+        std::span<const std::uint32_t> spirv;
+        std::chrono::steady_clock::time_point start;
+        TimedDraw(VulkanDevice& device, std::span<const std::uint32_t> spirv) : device(device), spirv(spirv) {
+            if (GpuTimes::Frames() == 0) return;
+            device.WaitIdle();
+            start = std::chrono::steady_clock::now();
+        }
+        ~TimedDraw() {
+            if (GpuTimes::Frames() == 0) return;
+            try {
+                device.WaitIdle();
+                gpuTimes().Add(2, spirv, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(), 0, 0, 0);
+            } catch (...) {
+            }
+        }
+    } timedDraw(*this, shaders.empty() ? std::span<const std::uint32_t>{} : std::span<const std::uint32_t>(shaders.back().program->spirv));
     // Two stdout lines per draw cost ~1.3 ms per frame of the queue-0 worker (part of it under the
     // GPU mutex); APS5_TRACE_DRAWS=1 restores them.
     static const bool trace = std::getenv("APS5_TRACE_DRAWS") != nullptr;
@@ -3205,11 +3295,25 @@ std::shared_ptr<RecipeHit> VulkanDevice::PrepareRecipe(const std::shared_ptr<con
 }
 
 void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::uint64_t programAddress, std::shared_ptr<PreparedDispatch> prepared, std::shared_ptr<const Recipe>* recipe) {
+    if (GpuTimes::Frames() == 0) {
+        static_cast<void>(dispatch(shader, x, y, z, 0, snapshots, programAddress, std::move(prepared), recipe));
+        return;
+    }
+    WaitIdle();
+    const auto start = std::chrono::steady_clock::now();
     static_cast<void>(dispatch(shader, x, y, z, 0, snapshots, programAddress, std::move(prepared), recipe));
+    WaitIdle();
+    gpuTimes().Add(0, shader.spirv, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(), x, y, z);
 }
 
 VulkanDevice::IndirectOutcome VulkanDevice::DispatchIndirect(const ShaderRecompiler::RecompileResult& shader, std::uint64_t arguments, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::uint64_t programAddress, std::shared_ptr<PreparedDispatch> prepared, std::shared_ptr<const Recipe>* recipe) {
-    return dispatch(shader, 0, 0, 0, arguments, snapshots, programAddress, std::move(prepared), recipe);
+    if (GpuTimes::Frames() == 0) return dispatch(shader, 0, 0, 0, arguments, snapshots, programAddress, std::move(prepared), recipe);
+    WaitIdle();
+    const auto start = std::chrono::steady_clock::now();
+    const auto outcome = dispatch(shader, 0, 0, 0, arguments, snapshots, programAddress, std::move(prepared), recipe);
+    WaitIdle();
+    gpuTimes().Add(1, shader.spirv, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(), 0, 0, 0);
+    return outcome;
 }
 
 void VulkanDevice::decideIndirect(RecordedDispatch& record, IndirectOutcome& outcome, char* groupsText) {

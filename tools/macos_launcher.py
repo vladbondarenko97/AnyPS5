@@ -123,6 +123,12 @@ def convert(source):
     # guest memory each frame; this trusts that the CPU leaves pending targets alone. Drop the line
     # for a title that draws wrong, and the whole block once the port tracks writes.
     # APS5_PLAYTEST=1 logs unimplemented calls and failed draws as "[playtest] ..." and goes on.
+    # ponytail: a Unity title that asks for a 4K video output renders at 4K, about four times the GPU
+    # work an Apple GPU does in time (PPSA05496: 2 frames per second at 4K, 6.6 at 1080p). The copy in
+    # the bundle asks for 1080p; the title's own folder is not touched. Drop this when 4K is fast enough.
+    boot = bundle / "Contents" / "Resources" / "game" / "app0" / "Media" / "boot.config"
+    if boot.is_file():
+        boot.write_text(boot.read_text().replace("platform-ps5-video-out-width=3840", "platform-ps5-video-out-width=1920"))
     launch = bundle / "Contents" / "MacOS" / "launch"
     script = launch.read_text()
     if script.count('cd "$run"') != 1:
