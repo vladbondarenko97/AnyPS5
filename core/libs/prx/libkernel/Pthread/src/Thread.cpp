@@ -327,6 +327,7 @@ int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, Pthread
     p->_thr = std::thread([self, args = std::move(args), ready = start.get_future()]() mutable {
         if (!ready.get()) return;
         self->threadId = std::this_thread::get_id();
+        self->host = pthread_self();
         struct ThreadGuard {
             PthreadPrivate* self;
             ~ThreadGuard() {
@@ -426,6 +427,7 @@ Pthread APS5_VABI scePthreadSelf() {
         adoptedThread->_detached = true;
         adoptedThread->_adopted = true;
         adoptedThread->threadId = std::this_thread::get_id();
+        adoptedThread->host = pthread_self();
         SetStackFromHost(adoptedThread.get());
         currentThread = adoptedThread.get();
     }

@@ -539,10 +539,12 @@ int APS5_VABI sceKernelClockGettime(KernelClockid clock_id, KernelTimespec* tp) 
     return clock_gettime_nid_postfix(static_cast<int>(clock_id), tp);
 }
 
-int APS5_VABI sceKernelConvertLocaltimeToUtc(int64_t local_time, int64_t reserved, int64_t* utc_time, KernelTimezone* timezone, int32_t* dst_seconds) {
+// The fourth argument is the same 16-byte record sceKernelConvertUtcToLocaltime fills: mktime of
+// PPSA05496's libc.prx reads its west_sec and dst_sec (offsets 8 and 12) after the call.
+int APS5_VABI sceKernelConvertLocaltimeToUtc(int64_t local_time, int64_t reserved, int64_t* utc_time, KernelTimesec* st, int32_t* dst_seconds) {
     (void)reserved;
     if (utc_time != nullptr) *utc_time = local_time;
-    if (timezone != nullptr) *timezone = {0, 0};
+    if (st != nullptr) *st = {local_time, 0u, 0u};
     if (dst_seconds != nullptr) *dst_seconds = 0;
     return 0;
 }

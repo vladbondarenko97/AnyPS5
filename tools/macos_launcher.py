@@ -108,6 +108,13 @@ def convert(source):
             if module.is_file():
                 (staged / name).mkdir(exist_ok=True)
                 (staged / name / module.name).write_bytes(unwrap(module.read_bytes()))
+    # Modules elsewhere (Unity keeps Il2CppUserAssemblies.prx in Media/Modules and loads its plugins
+    # from Media/Plugins by path): the relinker converts each where it is.
+    for module in sorted(title.rglob("*.prx")):
+        relative = module.relative_to(title)
+        if relative.parts[0] not in MODULE_DIRECTORIES and module.is_file():
+            (staged / relative).parent.mkdir(parents=True, exist_ok=True)
+            (staged / relative).write_bytes(unwrap(module.read_bytes()))
     bundle = WORK / f"{source.stem}.app"
     subprocess.run([relinker, "--macos", "--to-intel", staged / "eboot.elf", relinked / "eboot"], check=True, capture_output=True, text=True)
     subprocess.run([sys.executable, ROOT / "tools" / "package_macos_app.py", "--relinked", relinked, "--game", title,

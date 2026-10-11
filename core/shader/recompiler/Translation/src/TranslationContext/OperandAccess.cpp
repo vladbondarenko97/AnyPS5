@@ -382,6 +382,8 @@ IrU32 TranslationContext::readRawU32(const RdnaOperand& operand) {
         case RdnaOperandKind::FloatInlineConstant: return IrU32(ir.Constant(operand.value));
         case RdnaOperandKind::Null:
         case RdnaOperandKind::PopsExitingWaveId: return IrU32(ir.Constant(0u));
+        case RdnaOperandKind::SharedBase:
+        case RdnaOperandKind::PrivateBase: throw std::runtime_error("the flat address apertures (src_shared_base, src_private_base) are not modeled");
         case RdnaOperandKind::ScalarRegister: return IrU32(ir.GetScalarReg(static_cast<ScalarReg>(operand.reg)));
         case RdnaOperandKind::VectorRegister: return IrU32(ir.GetVectorReg(static_cast<VectorReg>(operand.reg)));
         case RdnaOperandKind::VccLo: return IrU32(ir.GetVccLo());

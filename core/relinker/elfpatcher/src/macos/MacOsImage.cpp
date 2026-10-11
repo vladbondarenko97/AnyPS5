@@ -454,6 +454,12 @@ std::vector<std::uint8_t> WriteMacOsImage(MacOsImageInput& input) {
         metaEnd += 8;
         input.Binds.push_back({symbol, metaRva + static_cast<std::uint32_t>(slot)});
     }
+    // A guest module asks libkernel for the arguments sceKernelLoadStartModule was given for it.
+    const auto startArgumentsSlot = metaEnd;
+    if (input.InitRva != 0) {
+        metaEnd += 8;
+        input.Binds.push_back({"_Aps5ModuleStartArguments_nid_no_patch", metaRva + static_cast<std::uint32_t>(startArgumentsSlot)});
+    }
     meta.resize(metaEnd, 0);
     for (std::size_t index = 0; index < input.TlsExports.size(); ++index) {
         const auto& variable = input.TlsExports[index];
@@ -582,7 +588,15 @@ std::vector<std::uint8_t> WriteMacOsImage(MacOsImageInput& input) {
             code.Rip({0x48, 0x89, 0x05}, import.Rva);                        // mov [rip + slot], rax
         }
         if (input.InitRva != 0) {
-            callZeroArgs();
+            // module_start(args, argp): the size and the block the title passed, or 0 and null.
+            code.Emit({0x48, 0x83, 0xec, 0x10});                             // sub rsp, 16
+            code.Rip({0x48, 0x8d, 0x3d}, 0);                                 // lea rdi, [rip + header]
+            code.Emit({0x48, 0x89, 0xe6});                                   // mov rsi, rsp
+            code.Rip({0xff, 0x15}, metaRva + static_cast<std::uint32_t>(startArgumentsSlot)); // call [rip + arguments]
+            code.Emit({0x48, 0x89, 0xc7});                                   // mov rdi, rax
+            code.Emit({0x48, 0x8b, 0x34, 0x24});                             // mov rsi, [rsp]
+            code.Emit({0x31, 0xd2});                                         // xor edx, edx
+            code.Emit({0x48, 0x83, 0xc4, 0x10});                             // add rsp, 16
             code.Rip({0xe8}, input.InitRva);
         }
         for (const auto slot : input.InitArrayRvas) callSlot(slot);

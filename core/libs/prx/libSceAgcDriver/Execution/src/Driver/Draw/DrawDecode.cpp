@@ -17,7 +17,9 @@ std::uint32_t ReadGraphicsRegister(const Registers& registers, std::uint32_t off
 void DecodeGraphicsPrograms(DrawDecode& decoded, const QueueState& queue, const ShaderRegistry& registry, bool staticAbi, bool includeFragment) {
     using Stage = ShaderRecompiler::ShaderStage;
     using Role = ShaderRecompiler::ProgramRole;
-    const auto programAddress = [&](std::uint32_t base) {
+    const auto programAddress = [&](std::uint32_t base) -> std::uint64_t {
+        // A queue that never set the pixel program draws with the null pixel program.
+        if (base == 0x008 && !queue.shader.contains(0x008)) return 0;
         Graphics::NoteRegisterRead(Graphics::RegisterBank::Shader, base);
         Graphics::NoteRegisterRead(Graphics::RegisterBank::Shader, base + 1);
         const auto high = ReadGraphicsRegister(queue.shader, base + 1);

@@ -37,6 +37,8 @@ export VK_DRIVER_FILES="${{VK_DRIVER_FILES:-$contents/Resources/vulkan/icd.d/Mol
 export ANYPS5_SHADER_CACHE_DIR="${{ANYPS5_SHADER_CACHE_DIR:-$HOME/Library/Caches/{identifier}/shader_cache}}"
 mkdir -p "$ANYPS5_SHADER_CACHE_DIR" "$HOME/Library/Logs/AnyPS5" "$run/download0"
 ln -sfn "$contents/Resources/game/app0" "$run/app0"
+# After a crash macOS asks whether to reopen the windows, in an alert that blocks the title.
+defaults write {identifier} ApplePersistenceIgnoreState -bool YES
 cd "$run" || exit 1
 exec "$here/eboot" "$@" >> "$HOME/Library/Logs/AnyPS5/{title_id}.log" 2>&1
 """

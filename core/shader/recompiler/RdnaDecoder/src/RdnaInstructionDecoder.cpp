@@ -217,6 +217,9 @@ RdnaOperand DecodeRdnaScalarSource(std::uint32_t code, std::uint32_t programCoun
         case 125u: operand.kind = RdnaOperandKind::Null; return operand;
         case 126u: operand.kind = RdnaOperandKind::ExecLo; return operand;
         case 127u: operand.kind = RdnaOperandKind::ExecHi; return operand;
+        // The flat address apertures (SH_MEM_BASES): a 64-bit read gives the 16-bit base in bits 48-63.
+        case 235u: operand.kind = RdnaOperandKind::SharedBase; return operand;
+        case 237u: operand.kind = RdnaOperandKind::PrivateBase; return operand;
         case 239u: operand.kind = RdnaOperandKind::PopsExitingWaveId; return operand;
         case 248u:
             operand.kind = RdnaOperandKind::FloatInlineConstant;
@@ -315,6 +318,8 @@ std::string RdnaOperandToString(const RdnaOperand& operand) {
         case RdnaOperandKind::ExecZ: return "execz";
         case RdnaOperandKind::M0: return "m0";
         case RdnaOperandKind::PopsExitingWaveId: return "pops_exiting_wave_id";
+        case RdnaOperandKind::SharedBase: return "shared_base";
+        case RdnaOperandKind::PrivateBase: return "private_base";
     }
 
     throw std::invalid_argument("unsupported operand kind for string conversion");

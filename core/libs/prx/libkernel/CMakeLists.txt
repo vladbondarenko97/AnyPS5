@@ -326,7 +326,7 @@ if(BUILD_TESTING)
         set_tests_properties(guest_exception_handler PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
-    if(WIN32)
+    if(WIN32 OR APPLE)
         add_test_executable(guest_raise_exception_tests ${LIBS_INCLUDE_DIR}/tests/GuestRaiseException.cpp)
         target_include_directories(guest_raise_exception_tests PRIVATE ${LIBS_INCLUDE_DIR})
         target_link_libraries(guest_raise_exception_tests PRIVATE libkernel libc)

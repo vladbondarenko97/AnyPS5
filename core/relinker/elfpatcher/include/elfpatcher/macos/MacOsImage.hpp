@@ -54,7 +54,8 @@ struct MacOsImageInput {
     std::vector<std::string> RunPaths;
     // Executables: where the entry stub hands over.
     std::uint32_t EntryRva = 0;
-    // Guest modules: run from the image initializer with zero arguments, finalizers at exit or unload.
+    // Guest modules: run from the image initializer, finalizers at exit or unload. The module initializer
+    // gets the arguments of the sceKernelLoadStartModule call that loads it, the others none.
     std::uint32_t InitRva = 0;
     std::uint32_t FiniRva = 0;
     std::vector<std::uint32_t> InitArrayRvas;

@@ -29,6 +29,7 @@
 #elif defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#include <time.h>
 #include <pthread.h>
 #else
 #include <cerrno>
@@ -1786,10 +1787,82 @@ bool EqualsCommitted(std::uint64_t address, std::span<const std::byte> bytes) {
     return EqualsCommittedUnsynced(address, bytes);
 }
 
+#ifdef __APPLE__
+// macOS has no guest write tracking (Rosetta aborts on a write fault inside some translated AVX
+// stores, so pages cannot be protected), and every use of a texture or buffer compares its guest
+// memory with the saved copy; a scene holds gigabytes of them. A range found equal is compared in
+// full again only after RecentEqualNanos; until then a use compares 64 bytes of every 16 KiB, and
+// one 64 KiB block is always judged by 64 bytes of every 1 KiB.
+// A range found equal is not looked at again before the next flip.
+// ponytail: a write that misses every sampled line is seen up to ten seconds late, or not at all
+// inside a block of a texture that changed elsewhere; replace with real tracking if macOS ever gets
+// a way to do it.
+struct RecentEqual {
+    std::uint64_t address = 0;
+    const std::byte* saved = nullptr;
+    std::size_t size = 0;
+    std::uint64_t until = 0;
+    std::uint64_t frame = 0;
+};
+
+// One slot per range and saved copy: several textures over one address each keep their own copy.
+RecentEqual& recentEqual(std::uint64_t address, const std::byte* saved) {
+    thread_local std::array<RecentEqual, 8192> recent {};
+    return recent[(((address >> 12u) ^ (reinterpret_cast<std::uintptr_t>(saved) >> 6u)) * 0x9e3779b97f4a7c15ull >> 51u) % recent.size()];
+}
+
+constexpr std::uint64_t RecentEqualNanos = 10'000'000'000;
+std::atomic<std::uint64_t> flippedFrames{1};
+constexpr std::size_t SampleStride = 16384;
+constexpr std::size_t SampleBytes = 64;
+constexpr std::size_t BlockSampleStride = 1024;
+
+bool sampledEqual(const std::byte* guest, const std::byte* saved, std::size_t size, std::size_t stride) {
+    if (size <= 4 * SampleBytes) return std::memcmp(guest, saved, size) == 0;
+    for (std::size_t offset = 0; offset + SampleBytes <= size; offset += stride) {
+        if (std::memcmp(guest + offset, saved + offset, SampleBytes) != 0) return false;
+    }
+    return std::memcmp(guest + size - SampleBytes, saved + size - SampleBytes, SampleBytes) == 0;
+}
+#endif
+
+void NoteFlip() {
+#ifdef __APPLE__
+    flippedFrames.fetch_add(1, std::memory_order_relaxed);
+#endif
+}
+
 bool EqualsCommittedUnsynced(std::uint64_t address, std::span<const std::byte> bytes) {
     if (bytes.empty()) return true;
+#ifdef __APPLE__
+    auto& recent = recentEqual(address, bytes.data());
+    const auto frame = flippedFrames.load(std::memory_order_relaxed);
+    const bool known = recent.address == address && recent.saved == bytes.data() && recent.size == bytes.size();
+    // Found equal earlier in this frame: not looked at again before the next flip.
+    if (known && recent.frame == frame) return true;
+    if (Accessible(reinterpret_cast<const void*>(address), bytes.size())) {
+        const auto now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        const auto* guest = reinterpret_cast<const std::byte*>(address);
+        // A differing sample settles it. One 64 KiB block of a texture (the per-block pass over a
+        // texture that differs somewhere) is settled by a denser sample either way.
+        const bool block = bytes.size() <= 65536;
+        if (!sampledEqual(guest, bytes.data(), bytes.size(), block ? BlockSampleStride : SampleStride)) return false;
+        if (block && bytes.size() > 4 * SampleBytes) return true;
+        if (known && now < recent.until) {
+            recent.frame = frame;
+            return true;
+        }
+        const TimedAccess timed(CounterCompare, bytes.size());
+        const bool equal = std::memcmp(guest, bytes.data(), bytes.size()) == 0;
+        // Spread over the interval, so the full compares of a scene's textures do not land on one frame.
+        recent = equal ? RecentEqual{address, bytes.data(), bytes.size(), now + RecentEqualNanos / 2 + (address >> 12u) * 0x9e3779b97f4a7c15ull % (RecentEqualNanos / 2), frame} : RecentEqual{};
+        return equal;
+    }
+    const TimedAccess timed(CounterCompare, bytes.size());
+#else
     const TimedAccess timed(CounterCompare, bytes.size());
     if (Accessible(reinterpret_cast<const void*>(address), bytes.size())) return std::memcmp(reinterpret_cast<const void*>(address), bytes.data(), bytes.size()) == 0;
+#endif
     for (const auto& [begin, end] : CommittedRanges(address, bytes.size())) {
         if (std::memcmp(reinterpret_cast<const void*>(begin), bytes.data() + (begin - address), static_cast<std::size_t>(end - begin)) != 0) return false;
     }

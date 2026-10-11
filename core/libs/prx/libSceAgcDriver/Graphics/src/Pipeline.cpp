@@ -86,7 +86,8 @@ void ValidateDepthBounds(const Context& context, const State& state) {
 
 VkViewport DeviceViewport(const Context& context, const State& state) {
     auto viewport = state.viewport;
-    if (!context.depthRangeUnrestricted && !state.depth) {
+    // The range only places fragment depth, which nothing reads without a depth plane or depth tests.
+    if (!context.depthRangeUnrestricted && (!state.depth || (!state.depthTest && !state.depthWrite && !state.depthBoundsTest))) {
         viewport.minDepth = std::clamp(viewport.minDepth, 0.0f, 1.0f);
         viewport.maxDepth = std::clamp(viewport.maxDepth, 0.0f, 1.0f);
     }

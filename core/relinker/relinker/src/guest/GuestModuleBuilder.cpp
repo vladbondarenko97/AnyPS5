@@ -72,18 +72,33 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
         if (excludedModules.contains(name)) continue;
         if (std::none_of(paths.begin(), paths.end(), [&](const auto& path) { return path.filename().string() == name; })) missingNeeded.insert(name);
     }
-    if (!missingNeeded.empty()) {
+    // Modules elsewhere below the executable: one it needs is loaded with it; any other .prx is one the
+    // title loads by path while it runs (Unity's Media/Plugins), converted where it is and not preloaded.
+    std::set<std::filesystem::path> loadedOnRequest;
+    {
         std::map<std::string, std::filesystem::path> found;
+        std::map<std::string, std::vector<std::filesystem::path>> others;
         for (auto it = std::filesystem::recursive_directory_iterator(root); it != std::filesystem::recursive_directory_iterator(); ++it) {
             if (it->is_directory() && std::find(directories.begin(), directories.end(), it->path()) != directories.end()) {
                 it.disable_recursion_pending();
                 continue;
             }
             const auto name = it->path().filename().string();
-            if (!it->is_regular_file() || !missingNeeded.contains(name) || !isElf(it->path())) continue;
-            if (!found.emplace(name, it->path()).second) throw Domain::RelinkerException("Ambiguous needed module: " + found.at(name).string() + " and " + it->path().string());
+            if (!it->is_regular_file()) continue;
+            if (missingNeeded.contains(name)) {
+                if (!isElf(it->path())) continue;
+                if (!found.emplace(name, it->path()).second) throw Domain::RelinkerException("Ambiguous needed module: " + found.at(name).string() + " and " + it->path().string());
+            } else if (name.ends_with(".prx") && !name.ends_with(GuestModuleSuffix) && !excludedModules.contains(name) && isElf(it->path())) {
+                others[name].push_back(it->path());
+            }
         }
         for (const auto& [name, path] : found) paths.push_back(path);
+        for (const auto& [name, candidates] : others) {
+            // A name two files share cannot be told apart by the modules that import it; neither is converted.
+            if (candidates.size() != 1 || std::any_of(paths.begin(), paths.end(), [&](const auto& path) { return path.filename().string() == name; })) continue;
+            paths.push_back(candidates.front());
+            loadedOnRequest.insert(candidates.front());
+        }
     }
     if (!unmatchedExclusions.empty()) throw Domain::RelinkerException("Excluded guest module file not found: " + *unmatchedExclusions.begin());
     std::sort(paths.begin(), paths.end());
@@ -251,7 +266,7 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
         Io::AppendU64(dynamic.DynamicSegmentData, dynamic.DynStrData.size());
         Io::AppendString(dynamic.DynStrData, name);
     };
-    for (const auto index : order) if (!windows) addNeeded("$ORIGIN/app0/" + images[index].SourcePath.parent_path().lexically_relative(root).generic_string() + "/" + images[index].OutputName);
+    for (const auto index : order) if (!windows && !loadedOnRequest.contains(images[index].SourcePath)) addNeeded("$ORIGIN/app0/" + images[index].SourcePath.parent_path().lexically_relative(root).generic_string() + "/" + images[index].OutputName);
     for (const auto& name : hostLibraries) addNeeded(name);
     std::string guestRunPath = runPath;
     if (!windows) {

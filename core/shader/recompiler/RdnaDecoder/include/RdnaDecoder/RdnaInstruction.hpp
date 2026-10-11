@@ -47,7 +47,9 @@ enum class RdnaOperandKind {
     VccZ,
     ExecZ,
     M0,
-    PopsExitingWaveId
+    PopsExitingWaveId,
+    SharedBase,
+    PrivateBase
 };
 
 enum class RdnaImageDimension : std::uint32_t {

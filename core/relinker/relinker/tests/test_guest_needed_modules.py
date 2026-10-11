@@ -63,6 +63,20 @@ def main():
                 needed = needed_libraries(output.read_bytes())
                 assert needed == ["$ORIGIN/app0/Media/Modules/needed.prx.guest.prx"], needed
 
+            # A module the executable does not need is converted where it is and is not loaded with it.
+            case = work / f"{windows}-on-request"
+            plugins = case / "Media" / "Plugins"
+            plugins.mkdir(parents=True)
+            (plugins / "plugin.prx").write_bytes(module_with_symbol(True))
+            (case / "Media" / "Modules").mkdir(parents=True)
+            (case / "Media" / "Modules" / "needed.prx").write_bytes(module_with_symbol(False))
+            result, output = convert(case, windows)
+            assert result.returncode == 0, (result.stdout, result.stderr)
+            assert (case / "app0" / "Media" / "Plugins" / "plugin.prx.guest.prx").is_file(), result.stdout
+            if not windows:
+                needed = needed_libraries(output.read_bytes())
+                assert needed == ["$ORIGIN/app0/Media/Modules/needed.prx.guest.prx"], needed
+
             case = work / f"{windows}-ambiguous"
             for name in ("first", "second"):
                 (case / name).mkdir(parents=True)

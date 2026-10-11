@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <cstdio>
 #include <cstddef>
 #include <cstring>
 #include <stdexcept>
@@ -227,14 +228,45 @@ int APS5_VABI sceKernelGetModuleInfoForUnwind(uint64_t addr, int flags, ModuleIn
 #endif
 }
 
+#ifdef __APPLE__
+// The module this thread is loading with sceKernelLoadStartModule and what its module_start gets.
+struct PendingStart {
+    std::string file;
+    size_t args = 0;
+    const void* argp = nullptr;
+};
+thread_local PendingStart pendingStart;
+
+// Called by a converted module's initializer (MacOsImage.cpp) with its Mach-O header.
+size_t Aps5ModuleStartArguments_nid_no_patch(const void* header, const void** argp) {
+    *argp = nullptr;
+    Dl_info image {};
+    if (pendingStart.file.empty() || !dladdr(header, &image) || image.dli_fname == nullptr) return 0;
+    const std::string path(image.dli_fname);
+    const auto name = path.substr(path.find_last_of('/') + 1);
+    if (name != pendingStart.file && name != pendingStart.file + ".guest.prx") return 0;
+    *argp = pendingStart.argp;
+    return pendingStart.args;
+}
+#endif
+
 KernelModule APS5_VABI sceKernelLoadStartModule(const char* module_file_name, size_t args, const void* argp, uint32_t flags, const KernelLoadModuleOpt* opt, int* res) {
- (void)args;
- (void)argp;
  (void)flags;
  (void)opt;
  if (res) *res = 0;
  if (!module_file_name) return static_cast<KernelModule>(SCE_KERNEL_ERROR_EFAULT);
+#ifdef __APPLE__
+ const std::string requested(module_file_name);
+ pendingStart = {requested.substr(requested.find_last_of('/') + 1), args, argp};
+ // Converted modules bind each other's exports by flat lookup, which skips an image opened locally:
+ // a module loaded here has to be visible to the ones loaded after it, as on the console.
+ void* handle = dlopen_nid_postfix(module_file_name, kRtldNow | 0x100);
+ pendingStart = {};
+#else
+ (void)args;
+ (void)argp;
  void* handle = dlopen_nid_postfix(module_file_name, kRtldNow);
+#endif
  if (!handle) return static_cast<KernelModule>(SCE_KERNEL_ERROR_ENOENT);
  return static_cast<KernelModule>(reinterpret_cast<intptr_t>(handle));
 }

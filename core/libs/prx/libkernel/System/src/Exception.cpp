@@ -11,6 +11,12 @@
 #include <stdexcept>
 #ifdef _WIN32
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <atomic>
+#include <cerrno>
+#include <pthread.h>
+#include <signal.h>
+#include <sys/ucontext.h>
 #endif
 
 extern "C" Pthread APS5_VABI scePthreadSelf();
@@ -245,6 +251,76 @@ bool RaiseOn(Pthread thread, GuestExceptionHandler handler, int signum) {
     ResumeThread(native);
     return true;
 }
+#elif defined(__APPLE__)
+// The guest's signal 30 is delivered as the host's SIGUSR1: the kernel stops the thread, steps over
+// its red zone and restores every register, vectors included, when the handler returns.
+std::atomic<GuestExceptionHandler> raised{nullptr};
+
+void HostSignal(int, siginfo_t*, void* raw) {
+    const auto handler = raised.load();
+    if (handler == nullptr) return;
+    const int error = errno;
+    auto& host = static_cast<ucontext_t*>(raw)->uc_mcontext->__ss;
+    GuestUcontext ucontext{};
+    auto& m = ucontext.mcontext;
+    m.rdi = host.__rdi;
+    m.rsi = host.__rsi;
+    m.rdx = host.__rdx;
+    m.rcx = host.__rcx;
+    m.r8 = host.__r8;
+    m.r9 = host.__r9;
+    m.rax = host.__rax;
+    m.rbx = host.__rbx;
+    m.rbp = host.__rbp;
+    m.r10 = host.__r10;
+    m.r11 = host.__r11;
+    m.r12 = host.__r12;
+    m.r13 = host.__r13;
+    m.r14 = host.__r14;
+    m.r15 = host.__r15;
+    m.rip = host.__rip;
+    m.rsp = host.__rsp;
+    m.rflags = host.__rflags;
+    m.cs = host.__cs;
+    m.len = sizeof(GuestMcontext);
+    handler(30, &ucontext);
+    host.__rdi = m.rdi;
+    host.__rsi = m.rsi;
+    host.__rdx = m.rdx;
+    host.__rcx = m.rcx;
+    host.__r8 = m.r8;
+    host.__r9 = m.r9;
+    host.__rax = m.rax;
+    host.__rbx = m.rbx;
+    host.__rbp = m.rbp;
+    host.__r10 = m.r10;
+    host.__r11 = m.r11;
+    host.__r12 = m.r12;
+    host.__r13 = m.r13;
+    host.__r14 = m.r14;
+    host.__r15 = m.r15;
+    host.__rip = m.rip;
+    host.__rsp = m.rsp;
+    host.__rflags = m.rflags;
+    errno = error;
+}
+
+bool RaiseOn(Pthread thread, GuestExceptionHandler handler) {
+    static const bool installed = [] {
+        struct sigaction action{};
+        action.sa_sigaction = HostSignal;
+        action.sa_flags = SA_SIGINFO | SA_RESTART;
+        sigemptyset(&action.sa_mask);
+        if (sigaction(SIGUSR1, &action, nullptr) != 0) throw std::runtime_error("sceKernelRaiseException: cannot install the host signal handler");
+        return true;
+    }();
+    static_cast<void>(installed);
+    raised.store(handler);
+    const int result = pthread_kill(thread->host, SIGUSR1);
+    if (result == ESRCH) return false;
+    if (result != 0) throw std::runtime_error("sceKernelRaiseException: cannot signal the target thread");
+    return true;
+}
 #endif
 
 }
@@ -341,6 +417,8 @@ int APS5_VABI sceKernelRaiseException(Pthread thread, int signum) {
  if (handler == nullptr) throw std::runtime_error("sceKernelRaiseException: no handler installed for the signal");
 #ifdef _WIN32
  return RaiseOn(thread, handler, signum) ? 0 : SCE_KERNEL_ERROR_ESRCH;
+#elif defined(__APPLE__)
+ return RaiseOn(thread, handler) ? 0 : SCE_KERNEL_ERROR_ESRCH;
 #else
  NotImplemented_nid_no_patch(__func__);
  return 0;

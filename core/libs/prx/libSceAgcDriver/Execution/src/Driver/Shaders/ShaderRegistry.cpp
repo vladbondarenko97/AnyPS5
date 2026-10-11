@@ -181,7 +181,7 @@ std::shared_ptr<const ShaderRecompiler::SourceHandle> SourceHandleFor(const Shad
         if (snapshot.type != 0 || request.shader.stage != ShaderRecompiler::ShaderStage::Compute) throw std::runtime_error("AGC driver: unregistered program is not a compute shader");
         APS5_LOG_ERR("Compute shader 0x%llx was not registered; preparing its artifact at dispatch", static_cast<unsigned long long>(snapshot.codeAddress));
     }
-    if (snapshot.header.empty() || (snapshot.prepared->entries.empty() && request.shader.stage == ShaderRecompiler::ShaderStage::Compute)) {
+    if (snapshot.header.empty() || (snapshot.prepared->entries.empty() && request.shader.stage == ShaderRecompiler::ShaderStage::Compute) || request.shader.stage == ShaderRecompiler::ShaderStage::Fragment) {
         auto handle = ShaderRecompiler::PrepareShader(request);
         snapshot.prepared->entries.push_back({codeOffset, handle});
         return handle;
@@ -206,6 +206,20 @@ ShaderRecompiler::RectListShaders PreparedRectangle(const ShaderSnapshot& snapsh
     throw std::runtime_error("AGC driver: prepared rectangle artifacts are missing");
 }
 
+ShaderRecompiler::RectListShaders PreparedRectangle(const ShaderSnapshot& snapshot, const ShaderRecompiler::RecompileResult& vertex, const ShaderRecompiler::RecompileResult& fragment, const ShaderRecompiler::SpirvTarget& target) {
+    std::lock_guard lock(snapshot.prepared->mutex);
+    for (const auto& entry : snapshot.prepared->rectangles) {
+        if (entry.vertexId == vertex.variantId && entry.fragmentId == fragment.variantId) {
+            require(entry.shaders != nullptr, "prepared rectangle artifact is missing");
+            return *entry.shaders;
+        }
+    }
+    // A pair registration did not link (a pixel shader prepared at the draw) is linked here.
+    auto shaders = std::make_shared<const ShaderRecompiler::RectListShaders>(ShaderRecompiler::BuildRectListShaders(vertex, fragment, target));
+    snapshot.prepared->rectangles.push_back({vertex.variantId, fragment.variantId, shaders});
+    return *shaders;
+}
+
 ShaderRecompiler::PreparedShaderInvocation InvocationFor(const ShaderSnapshot& snapshot, std::size_t codeOffset, const ShaderRecompiler::RecompileRequest& request) {
     require(codeOffset < snapshot.code.size(), "prepared shader code offset is outside the snapshot");
     const auto code = std::span(snapshot.code).subspan(codeOffset);
@@ -224,7 +238,7 @@ ShaderRecompiler::PreparedShaderInvocation InvocationFor(const ShaderSnapshot& s
         if (snapshot.type != 0 || request.shader.stage != ShaderRecompiler::ShaderStage::Compute) throw std::runtime_error("AGC driver: unregistered program is not a compute shader");
         APS5_LOG_ERR("Compute shader 0x%llx was not registered; preparing its artifact at dispatch", static_cast<unsigned long long>(snapshot.codeAddress));
     }
-    if (snapshot.header.empty() || (snapshot.prepared->entries.empty() && request.shader.stage == ShaderRecompiler::ShaderStage::Compute)) {
+    if (snapshot.header.empty() || (snapshot.prepared->entries.empty() && request.shader.stage == ShaderRecompiler::ShaderStage::Compute) || request.shader.stage == ShaderRecompiler::ShaderStage::Fragment) {
         auto handle = ShaderRecompiler::PrepareShader(request);
         invocationRequest = request;
         invocationRequest.shader.code = ShaderRecompiler::GetPreparedCode(*handle);
@@ -328,7 +342,7 @@ std::vector<PreparedShaders::Entry> PrepareRegistered(const ShaderSnapshot& snap
     case 5: stage = Stage::Local; programRegister = 0x148; resourceRegister = 0x10b; firstUser = 8; break;
     case 6: stage = Stage::Mesh; programRegister = 0x088; resourceRegister = 0x08b; break;
     case 7: stage = Stage::TessellationControl; programRegister = 0x108; resourceRegister = 0x10b; break;
-    default: throw std::runtime_error("AGC driver: unsupported registered shader type");
+    default: throw std::runtime_error("AGC driver: unsupported registered shader type " + std::to_string(snapshot.type));
     }
     const auto high = RegisterValue(state.shader, programRegister + 1);
     if ((high & ~0xffu) != 0) throw std::runtime_error("AGC driver: invalid registered program address");
@@ -686,6 +700,12 @@ void Driver::RegisterShader(const Shader* shader) {
     require(fields.file_header == 0x34333231u && fields.version == 0x18u, "invalid shader header");
     require(fields.header_size >= sizeof(Shader), "shader header is smaller than its fixed fields");
     require(fields.shader_size != 0 && (fields.shader_size & 3u) == 0, "invalid shader size");
+    // A fetch shader (type 8) is no pipeline stage: the vertex stage that calls it gets its attribute
+    // fetches inlined from its own header and user data, so there is nothing to prepare.
+    if (fields.type == 8) {
+        transaction.Commit();
+        return;
+    }
     GuestMemory::CheckRange(shader, fields.header_size, 1);
     const auto* code = const_cast<const void*>(fields.code);
     GuestMemory::CheckRange(code, fields.shader_size, 256);
@@ -721,7 +741,15 @@ void Driver::RegisterShader(const Shader* shader) {
     registered.shader = snapshot.registeredState->shader;
     registered.context = snapshot.registeredState->context;
     registered.userConfig = snapshot.registeredState->userConfig;
-    snapshot.prepared->entries = PrepareRegistered(snapshot, *localDevice, registered, true);
+    try {
+        snapshot.prepared->entries = PrepareRegistered(snapshot, *localDevice, registered, true);
+    } catch (const std::invalid_argument& error) {
+        // Code the decoder or the control-flow analysis rejects: a compute shader stays registered and
+        // fails where it is dispatched, like one whose translation fails.
+        if (snapshot.type != 0) throw;
+        const std::string_view reason(error.what());
+        APS5_LOG_ERR("Compute shader 0x%llx was not prepared at registration and is prepared at dispatch: %.*s", static_cast<unsigned long long>(snapshot.codeAddress), static_cast<int>(std::min<std::size_t>(reason.find('\n'), reason.size())), reason.data());
+    }
     if ((snapshot.type == 0 || snapshot.type == 1) && !snapshot.prepared->entries.empty()) {
         std::vector<std::uint64_t> key;
         BuildRegisteredAbiKey(registered, *localDevice, key);
